@@ -1,0 +1,222 @@
+# cron - parse a cron expression and answer when it next fires.
+#
+#   import cron
+#
+#   s = cron.parse("*/15 9-17 * * mon-fri")
+#   cron.next(s, time.now())     # the next quarter-hour in office hours
+#   cron.matches(s, time.now())  # is now one of them?
+#
+# Five fields, the classic ones: minute, hour, day-of-month, month, day-of-week.
+# Each takes `*`, a number, a range `a-b`, a step `*/n` or `a-b/n`, and a
+# comma-separated list of those. Months and weekdays may be named (`jan`,
+# `mon`). The `@daily` family is accepted too.
+#
+# Everything here is UTC. A scheduler that silently used local time would fire
+# an hour out twice a year and be right the rest of the time, which is the worst
+# kind of wrong; if you want local time, convert before you call.
+
+import "./calendar.ecko"
+
+fail = fn(message) error({ kind: "cron", message: message })
+
+MONTHS = {
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    may: 5,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+}
+WEEKDAYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
+
+SHORTCUTS = {
+    "@yearly": "0 0 1 1 *",
+    "@annually": "0 0 1 1 *",
+    "@monthly": "0 0 1 * *",
+    "@weekly": "0 0 * * 0",
+    "@daily": "0 0 * * *",
+    "@midnight": "0 0 * * *",
+    "@hourly": "0 * * * *",
+}
+
+# A field value: a number, or a name from `names`.
+fn value_of(token, names, field) {
+    n = get(names, lower(token))
+    unless is_null(n) { return n }
+    v = try {
+        int(token)
+    } catch (e) {
+        fail("cron: '" + token + "' is not a number in the " + field + " field")
+    }
+    v
+}
+
+# One comma-separated field, expanded to the sorted set of values it allows.
+fn parse_field(spec, lo, hi, names, field) {
+    mut allowed = []
+    for part in split(spec, ",") {
+        piece = trim(part)
+        if piece == "" { fail("cron: empty value in the " + field + " field") }
+
+        # `*/n` and `a-b/n` both end in a step.
+        halves = split(piece, "/")
+        if len(halves) > 2 {
+            fail("cron: '" + piece + "' has more than one step in the " + field + " field")
+        }
+        step = if len(halves) == 2 {
+            s = value_of(trim(halves[1]), empty_map(), field)
+            if s < 1 { fail("cron: a step must be 1 or more in the " + field + " field") }
+            s
+        } else { 1 }
+
+        range = trim(halves[0])
+        bounds = if range == "*" { [lo, hi] } else {
+            ends = split(range, "-")
+            if len(ends) == 1 {
+                v = value_of(trim(ends[0]), names, field)
+                # A bare number with a step means "from here on", as cron does.
+                if len(halves) == 2 { [v, hi] } else { [v, v] }
+            } else if len(ends) == 2 {
+                [value_of(trim(ends[0]), names, field), value_of(trim(ends[1]), names, field)]
+            } else {
+                fail("cron: '" + range + "' is not a range in the " + field + " field")
+            }
+        }
+        lo_v = bounds[0]
+        hi_v = bounds[1]
+        if lo_v < lo or hi_v > hi or lo_v > hi_v {
+            fail(
+                "cron: " +
+                    field +
+                    " must be " +
+                    string(lo) +
+                    "-" +
+                    string(hi) +
+                    ", got '" +
+                    piece +
+                    "'",
+            )
+        }
+        mut v = lo_v
+        while v <= hi_v {
+            unless contains(allowed, v) { allowed = push(allowed, v) }
+            v = v + step
+        }
+    }
+    sort(allowed)
+}
+
+## parse(expr) -> a schedule, or raises kind `cron`.
+##
+## `expr` is five fields, or one of the `@daily` shortcuts. Whitespace between
+## fields is any amount.
+##
+## example:
+##   parse("*/15 9-17 * * mon-fri")
+export fn parse(expr) {
+    # Cron's oddest rule: when BOTH day-of-month and day-of-week are
+    text = trim(string(expr))
+    if text == "" { fail("cron: an empty expression matches nothing") }
+    resolved = if starts_with(text, "@") {
+        s = get(SHORTCUTS, lower(text))
+        if is_null(s) {
+            fail(
+                "cron: unknown shortcut '" +
+                    text +
+                    "' - try @hourly, @daily, @weekly, @monthly or @yearly",
+            )
+        }
+        s
+    } else { text }
+
+    mut fields = []
+    for f in split(resolved, " ") {
+        unless trim(f) == "" { fields = push(fields, trim(f)) }
+    }
+    unless len(fields) == 5 {
+        fail(
+            "cron: expected 5 fields (minute hour day month weekday), got " +
+                string(len(fields)) +
+                " in '" +
+                text +
+                "'",
+        )
+    }
+    {  # 7 is Sunday as well as 0, which is what every other cron accepts.
+        source: text,
+        minute: parse_field(fields[0], 0, 59, empty_map(), "minute"),
+        hour: parse_field(fields[1], 0, 23, empty_map(), "hour"),
+        day: parse_field(fields[2], 1, 31, empty_map(), "day-of-month"),
+        month: parse_field(fields[3], 1, 12, MONTHS, "month"),
+        weekday: parse_field(replace(fields[4], "7", "0"), 0, 6, WEEKDAYS, "day-of-week"),
+        day_restricted: trim(fields[2]) != "*",
+        weekday_restricted: trim(fields[4]) != "*",
+    }
+}
+# restricted, a day matching EITHER fires. Restricting only one is a
+# plain AND with the rest. Recorded at parse time because the raw `*`
+# cannot be recovered from the expanded set.
+
+fn day_matches(s, p) {
+    d = contains(s.day, p.day)
+    w = contains(s.weekday, p.weekday)
+    if s.day_restricted and s.weekday_restricted {
+        d or w
+    } else if s.day_restricted {
+        d
+    } else if s.weekday_restricted {
+        w
+    } else {
+        true
+    }
+}
+
+## matches(schedule, ms) -> whether the minute containing `ms` is one it fires in.
+export fn matches(schedule, ms) {
+    p = calendar.parts(calendar.floor_minute(ms))
+    contains(schedule.minute, p.minute) and
+        contains(schedule.hour, p.hour) and
+        contains(schedule.month, p.month) and
+        day_matches(schedule, p)
+}
+
+## next(schedule, from_ms) -> the first firing time strictly after `from_ms`.
+##
+## Raises when the schedule cannot fire within four years, which is what an
+## impossible date looks like: `0 0 30 2 *` is the 30th of February.
+##
+## example:
+##   next(parse("0 9 * * mon"), time.now())
+export fn next(schedule, from_ms) {
+    if from_ms < 0 { fail("cron: next() needs a timestamp at or after 1970") }
+    mut t = calendar.floor_minute(from_ms) + 60000
+    # Four years covers every leap-year cycle, so anything not found by then is
+    # a date the calendar never produces rather than one merely far away.
+    limit = t + 4 * 366 * 86400000
+    while t < limit {
+        p = calendar.parts(t)
+        if not contains(schedule.month, p.month) {
+            # Jump to the first minute of the next month rather than stepping.
+            t = if p.month == 12 {
+                calendar.at(p.year + 1, 1, 1, 0, 0)
+            } else {
+                calendar.at(p.year, p.month + 1, 1, 0, 0)
+            }
+        } else if not day_matches(schedule, p) {
+            t = calendar.at(p.year, p.month, p.day, 0, 0) + 86400000
+        } else if not contains(schedule.hour, p.hour) {
+            t = calendar.at(p.year, p.month, p.day, p.hour, 0) + 3600000
+        } else if not contains(schedule.minute, p.minute) {
+            t = t + 60000
+        } else {
+            return t
+        }
+    }
+    fail("cron: '" + schedule.source + "' has no next firing time - check the day and month")
+}

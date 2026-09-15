@@ -1,0 +1,24 @@
+# cron demo. Pure and offline - a fixed timestamp, so the output is the same
+# every run.
+#
+#   ecko example.ecko
+
+import "./main.ecko" as cron
+
+# 2024-01-01 00:00 UTC, a Monday.
+NOW = 1704067200000
+
+fn show(expr) {
+    s = cron.parse(expr)
+    print(fmt.pad_right(expr, 22) + " next: " + time.format(cron.next(s, NOW), "%Y-%m-%d %H:%M"))
+}
+
+import std.fmt
+import std.time
+
+for expr in ["*/15 * * * *", "0 9 * * mon-fri", "0 0 1 * *", "@daily", "0 0 29 2 *"] {
+    show(expr)
+}
+
+# A schedule that can never fire says so rather than hanging.
+print(try { cron.next(cron.parse("0 0 30 2 *"), NOW) } catch (e) { get(e, "message") })

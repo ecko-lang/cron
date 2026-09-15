@@ -1,0 +1,166 @@
+# Tests for cron expression parsing and next-firing-time.
+#
+# Offline and deterministic: every case uses a fixed timestamp rather than
+# `time.now()`, so a test cannot pass in January and fail in March.
+#
+# Reference times used below, all UTC:
+#   1704067200000  2024-01-01 00:00 Monday
+#   1709164800000  2024-02-29 00:00 Thursday   (a leap day)
+#   1700000000000  2023-11-14 22:13:20 Tuesday
+
+import std.test
+import "../main.ecko" as cron
+import "../calendar.ecko"
+
+MON_2024_01_01 = 1704067200000
+
+fn at(y, mo, d, h, mi) = calendar.at(y, mo, d, h, mi)
+
+# --- parsing ------------------------------------------------------------------
+
+test.case("a plain expression expands each field", fn() {
+    s = cron.parse("30 4 1 1 *")
+    test.eq(s.minute, [30])
+    test.eq(s.hour, [4])
+    test.eq(s.day, [1])
+    test.eq(s.month, [1])
+})
+
+test.case("a star expands to the whole range", fn() {
+    s = cron.parse("* * * * *")
+    test.eq(len(s.minute), 60)
+    test.eq(len(s.hour), 24)
+    test.eq(len(s.day), 31)
+    test.eq(len(s.month), 12)
+    test.eq(len(s.weekday), 7)
+})
+
+test.case("steps, ranges and lists", fn() {
+    test.eq(cron.parse("*/15 * * * *").minute, [0, 15, 30, 45])
+    test.eq(cron.parse("0 9-12 * * *").hour, [9, 10, 11, 12])
+    test.eq(cron.parse("0 0,6,12,18 * * *").hour, [0, 6, 12, 18])
+    test.eq(cron.parse("0 0-23/6 * * *").hour, [0, 6, 12, 18])
+})
+
+test.case("a bare number with a step runs to the end of the range", fn() {
+    # `5/10` means "from 5, every 10", which is what cron does.
+    test.eq(cron.parse("5/10 * * * *").minute, [5, 15, 25, 35, 45, 55])
+})
+
+test.case("months and weekdays may be named, in any case", fn() {
+    test.eq(cron.parse("0 0 1 JAN *").month, [1])
+    test.eq(cron.parse("0 0 1 jan-mar *").month, [1, 2, 3])
+    test.eq(cron.parse("0 0 * * mon-fri").weekday, [1, 2, 3, 4, 5])
+})
+
+test.case("7 is Sunday, as every other cron accepts", fn() {
+    test.eq(cron.parse("0 0 * * 7").weekday, [0])
+})
+
+test.case("the shortcut family expands", fn() {
+    test.eq(cron.parse("@daily").hour, [0])
+    test.eq(cron.parse("@hourly").minute, [0])
+    test.eq(cron.parse("@weekly").weekday, [0])
+    test.eq(cron.parse("@yearly").month, [1])
+})
+
+# --- parsing failures ----------------------------------------------------------
+
+test.case("a malformed expression is refused, not silently accepted", fn() {
+    test.err(fn() cron.parse(""), "empty")
+    test.err(fn() cron.parse("* * * *"), "5 fields")
+    test.err(fn() cron.parse("* * * * * *"), "5 fields")
+    test.err(fn() cron.parse("@nope"), "shortcut")
+})
+
+test.case("a value outside its field's range is refused", fn() {
+    test.err(fn() cron.parse("60 * * * *"), "minute")
+    test.err(fn() cron.parse("* 24 * * *"), "hour")
+    test.err(fn() cron.parse("* * 32 * *"), "day")
+    test.err(fn() cron.parse("* * * 13 *"), "month")
+    test.err(fn() cron.parse("* * * * 8"), "day-of-week")
+})
+
+test.case("a backwards range and a zero step are refused", fn() {
+    test.err(fn() cron.parse("0 12-9 * * *"), "hour")
+    test.err(fn() cron.parse("*/0 * * * *"), "step")
+})
+
+# --- next ---------------------------------------------------------------------
+
+test.case("next is strictly after the time given", fn() {
+    s = cron.parse("* * * * *")
+    # Exactly on a firing minute, next is the following one, never the same.
+    test.eq(cron.next(s, MON_2024_01_01), MON_2024_01_01 + 60000)
+})
+
+test.case("seconds below the minute do not produce a time in the past", fn() {
+    s = cron.parse("* * * * *")
+    # 22:13:20 -> the next firing is 22:14:00, not 22:13:00.
+    test.eq(cron.next(s, 1700000000000), at(2023, 11, 14, 22, 14))
+})
+
+test.case("a daily schedule lands on the right day", fn() {
+    s = cron.parse("30 9 * * *")
+    test.eq(cron.next(s, MON_2024_01_01), at(2024, 1, 1, 9, 30))
+    # Past today's firing, it rolls to tomorrow.
+    test.eq(cron.next(s, at(2024, 1, 1, 10, 0)), at(2024, 1, 2, 9, 30))
+})
+
+test.case("a weekday schedule skips the weekend", fn() {
+    s = cron.parse("0 9 * * mon-fri")
+    # Friday 2024-01-05 after 09:00 -> Monday the 8th.
+    test.eq(cron.next(s, at(2024, 1, 5, 10, 0)), at(2024, 1, 8, 9, 0))
+})
+
+test.case("a monthly schedule crosses the year boundary", fn() {
+    s = cron.parse("0 0 1 * *")
+    test.eq(cron.next(s, at(2024, 12, 2, 0, 0)), at(2025, 1, 1, 0, 0))
+})
+
+test.case("29 February is found in a leap year and skipped otherwise", fn() {
+    s = cron.parse("0 0 29 2 *")
+    test.eq(cron.next(s, at(2024, 1, 1, 0, 0)), at(2024, 2, 29, 0, 0))
+    # 2025, 2026 and 2027 have no 29 February; 2028 does.
+    test.eq(cron.next(s, at(2024, 3, 1, 0, 0)), at(2028, 2, 29, 0, 0))
+})
+
+test.case("a date the calendar never produces is refused, not looped on", fn() {
+    # The 30th of February. Without a bound this searches for ever.
+    test.err(fn() cron.next(cron.parse("0 0 30 2 *"), MON_2024_01_01), "no next firing")
+})
+
+# --- cron's oddest rule --------------------------------------------------------
+
+test.case("day-of-month and day-of-week together mean EITHER, not both", fn() {
+    # The documented POSIX behaviour: with both restricted, a day matching
+    # either fires. 2024-01-01 is a Monday; the 15th is also a Monday.
+    s = cron.parse("0 0 15 * mon")
+    test.ok(cron.matches(s, at(2024, 1, 8, 0, 0)), "Monday the 8th matches on weekday")
+    test.ok(cron.matches(s, at(2024, 1, 15, 0, 0)), "the 15th matches on both")
+    # 2024-02-15 is a Thursday - matches on day-of-month alone.
+    test.ok(cron.matches(s, at(2024, 2, 15, 0, 0)), "the 15th matches on day alone")
+})
+
+test.case("restricting only one of them is a plain AND", fn() {
+    s = cron.parse("0 0 15 * *")
+    test.ok(cron.matches(s, at(2024, 1, 15, 0, 0)), "the 15th")
+    test.ok(not cron.matches(s, at(2024, 1, 16, 0, 0)), "not the 16th")
+})
+
+# --- matches -------------------------------------------------------------------
+
+test.case("matches ignores seconds within the minute", fn() {
+    s = cron.parse("13 22 14 11 *")
+    test.ok(cron.matches(s, 1700000000000), "22:13:20 is inside the 22:13 minute")
+})
+
+test.case("next always produces a time that matches", fn() {
+    # The property that ties the two together: whatever next answers, matches
+    # must agree, for every shape of expression.
+    for expr in ["* * * * *", "*/7 * * * *", "0 9 * * mon-fri", "0 0 1 * *", "@hourly"] {
+        s = cron.parse(expr)
+        t = cron.next(s, MON_2024_01_01)
+        test.ok(cron.matches(s, t), expr + " -> next() gave a time matches() rejects")
+    }
+})

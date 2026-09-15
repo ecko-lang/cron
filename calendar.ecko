@@ -1,0 +1,72 @@
+# cron/calendar - civil dates from a Unix millisecond timestamp.
+#
+# Self-contained on purpose. The `datetime` package has all of this and more,
+# but a package that depends on another cannot ship correctly today: the
+# release workflow packs `ecko.json *.ecko` non-recursively, so a vendored
+# dependency is left out of the archive and the published package fails to
+# import. Every official package's manifest declares no dependencies for the
+# same reason.
+#
+# The conversions are Howard Hinnant's days_from_civil / civil_from_days, which
+# are exact for the whole proleptic Gregorian range and need no tables. Bounded
+# to 1970 and later here, which keeps every division positive - Ecko truncates
+# toward zero rather than flooring, and the algorithms assume floor for negative
+# inputs.
+
+MS_PER_DAY = 86400000
+MS_PER_HOUR = 3600000
+MS_PER_MINUTE = 60000
+
+## days_from_civil(y, m, d) -> days since 1970-01-01.
+export fn days_from_civil(y, m, d) {
+    yy = if m <= 2 { y - 1 } else { y }
+    era = yy / 400
+    yoe = yy - era * 400
+    mp = if m > 2 { m - 3 } else { m + 9 }
+    doy = (153 * mp + 2) / 5 + d - 1
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+}
+
+## civil_from_days(z) -> { year, month, day } for a day count since the epoch.
+export fn civil_from_days(z) {
+    zz = z + 719468
+    era = zz / 146097
+    doe = zz - era * 146097
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    mp = (5 * doy + 2) / 153
+    d = doy - (153 * mp + 2) / 5 + 1
+    m = if mp < 10 { mp + 3 } else { mp - 9 }
+    { year: if m <= 2 { y + 1 } else { y }, month: m, day: d }
+}
+
+## parts(ms) -> every field a cron expression can match on.
+##
+## `weekday` is 0 for Sunday through 6 for Saturday, which is what cron means
+## by its fifth field. 1970-01-01 was a Thursday, hence the +4.
+export fn parts(ms) {
+    days = ms / MS_PER_DAY
+    rest = ms % MS_PER_DAY
+    c = civil_from_days(days)
+    {
+        year: c.year,
+        month: c.month,
+        day: c.day,
+        hour: rest / MS_PER_HOUR,
+        minute: rest % MS_PER_HOUR / MS_PER_MINUTE,
+        weekday: (days + 4) % 7,
+    }
+}
+
+## at(year, month, day, hour, minute) -> the Unix millisecond timestamp.
+export fn at(year, month, day, hour, minute) {
+    days_from_civil(year, month, day) * MS_PER_DAY + hour * MS_PER_HOUR + minute * MS_PER_MINUTE
+}
+
+## floor_minute(ms) -> `ms` with seconds and milliseconds discarded.
+##
+## Cron's resolution is one minute, so everything below it is noise that would
+## otherwise make `next` answer a time in the past.
+export fn floor_minute(ms) = ms / MS_PER_MINUTE * MS_PER_MINUTE
