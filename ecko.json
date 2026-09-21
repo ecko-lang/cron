@@ -1,6 +1,6 @@
 {
   "module": "github.com/ecko-lang/cron",
-  "version": "0.30.0",
+  "version": "0.37.0",
   "entrypoint": "main.ecko",
   "description": "Cron expressions for Ecko: parse the five classic fields, ask when a schedule next fires, and test whether a moment matches. Pure - no capabilities.",
   "author": "Sean Nieuwoudt <sean@underwulf.com>",
