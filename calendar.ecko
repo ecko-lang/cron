@@ -47,7 +47,7 @@ export fn civil_from_days(z) {
 ## by its fifth field. 1970-01-01 was a Thursday, hence the +4.
 export fn parts(ms) {
     days = ms // MS_PER_DAY
-    rest = ms - days * MS_PER_DAY
+    rest = ms % MS_PER_DAY
     c = civil_from_days(days)
     {
         year: c.year,
@@ -55,7 +55,7 @@ export fn parts(ms) {
         day: c.day,
         hour: rest // MS_PER_HOUR,
         minute: rest % MS_PER_HOUR // MS_PER_MINUTE,
-        weekday: ((days + 4) % 7 + 7) % 7,
+        weekday: (days + 4) % 7,
     }
 }
 
