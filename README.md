@@ -38,7 +38,7 @@ loop {
         digest_overnight_mail()
         due = cron.next(schedule, time.now())
     }
-    sleep(30)
+    sleep(30000)  # milliseconds (Ecko 0.58+): check every 30 seconds
 }
 ```
 
