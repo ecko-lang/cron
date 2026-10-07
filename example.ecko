@@ -10,10 +10,10 @@ NOW = 1704067200000
 
 fn show(expr) {
     s = cron.parse(expr)
-    print(fmt.pad_right(expr, 22) + " next: " + time.format(cron.next(s, NOW), "%Y-%m-%d %H:%M"))
+    print(str.pad_end(expr, 22) + " next: " + time.format(cron.next(s, NOW), "%Y-%m-%d %H:%M"))
 }
 
-import std.fmt
+import std.str
 import std.time
 
 for expr in ["*/15 * * * *", "0 9 * * mon-fri", "0 0 1 * *", "@daily", "0 0 29 2 *"] {
