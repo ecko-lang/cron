@@ -105,9 +105,9 @@ Cron's resolution is one minute, so `matches` ignores seconds and `next` never
 answers a time in the past because of them.
 
 The calendar arithmetic is self-contained rather than built on the `datetime`
-package. Not preference: a package that declares a dependency cannot ship
-correctly today, because the release workflow archives `ecko.json` and the root
-`*.ecko` files only, leaving a vendored dependency out of the zip.
+package. It was written when the release archive left a vendored dependency
+out of the zip; the archive carries `vendor/` now, but keeping the arithmetic
+here leaves the package with no dependencies at all.
 
 ## Testing
 
